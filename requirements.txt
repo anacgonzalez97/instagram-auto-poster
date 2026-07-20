@@ -1,0 +1,5 @@
+google-api-python-client==2.149.0
+google-auth==2.35.0
+requests==2.32.3
+anthropic==0.39.0
+pynacl==1.5.0
