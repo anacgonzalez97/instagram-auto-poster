@@ -41,4 +41,7 @@ jobs:
           # ---- Estos dos NO son secrets, son opciones normales ----
           PUBLISH_TYPE: "POST"    # POST o STORY
           SELECT_MODE: "FIRST"    # FIRST o RANDOM
+          CAROUSEL_COUNT: "3"
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: python publish_instagram.py
+        
