@@ -1,4 +1,5 @@
 # publish_instagram.py
+from PIL import Image
 import os
 import io
 import sys
