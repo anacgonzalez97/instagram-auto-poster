@@ -8,7 +8,7 @@ on:
   workflow_dispatch:  # permite lanzarlo manualmente desde la pestana Actions
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   publish:
