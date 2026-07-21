@@ -30,19 +30,23 @@ log = logging.getLogger("ig-publisher")
 #  >>> AQUI NO SE PONE NADA. Todas las claves vienen de GitHub Secrets.
 #  El codigo las lee automaticamente de las variables de entorno.
 # ==================================================================
-GOOGLE_CREDS_JSON   = os.environ["GOOGLE_CREDENTIALS_JSON"]
-DRIVE_FOLDER_ID     = os.environ["1cSK8eSFQ88nFdERpEDJ2gRa1asRv_Db5?dmr=1&ec=wgc-drive-%5Bmodule%5D-goto"]
-PROCESSED_FOLDER_ID = os.environ.get("1c4QKFgRqWJKg4tv3AbCLwM6sif-A5iTo?dmr=1&ec=wgc-drive-%5Bmodule%5D-goto")
-IG_USER_ID          = os.environ["IG_USER_ID"]
-IG_ACCESS_TOKEN     = os.environ["IG_ACCESS_TOKEN"]
-ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY")
+# Carga las credenciales desde los Secrets de GitHub (si existen)
+GOOGLE_CREDS_JSON   = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+IG_USER_ID          = os.environ.get("IG_USER_ID", "")
+IG_ACCESS_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
+ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+
+# IDs fijas de Google Drive (Pega tus IDs reales entre las comillas)
+DRIVE_FOLDER_ID     = "1cSK8eSFQ88nFdERpEDJ2gRa1asRv_Db5?dmr=1&ec=wgc-drive-%5Bmodule%5D-goto"
+PROCESSED_FOLDER_ID = "1c4QKFgRqWJKg4tv3AbCLwM6sif-A5iTo?dmr=1&ec=wgc-drive-%5Bmodule%5D-goto"
+
+# Opciones por defecto
 PUBLISH_TYPE        = os.environ.get("PUBLISH_TYPE", "POST").upper()
 SELECT_MODE         = os.environ.get("SELECT_MODE", "FIRST").upper()
 
-GRAPH_API_VERSION = "v21.0"
-GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
-SCOPES = ["https://www.googleapis.com/auth/drive"]
-
+GRAPH_API_VERSION   = "v21.0"
+GRAPH_BASE          = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+SCOPES              = ["https://www.googleapis.com/auth/drive"]
 
 # ==================================================================
 # GOOGLE DRIVE
