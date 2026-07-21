@@ -192,7 +192,7 @@ def build_caption_ai(service, file_id, filename, mime_type):
 
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="cclaude-sonnet-4-5",
             max_tokens=400,
             messages=[
                 {
