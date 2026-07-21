@@ -231,6 +231,34 @@ def build_caption_ai(service, file_id, filename, mime_type):
 # ==================================================================
 # INSTAGRAM GRAPH API
 # ==================================================================
+def smart_crop_bytes(img_bytes):
+    """Recorta a un ratio válido de IG (4:5 vertical, 1.91:1 horizontal).
+    En verticales corta por abajo (conserva cara, quita pies)."""
+    im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    w, h = im.size
+    ratio = w / h
+
+    MIN_R, MAX_R = 4/5, 1.91  # límites de IG
+
+    if MIN_R <= ratio <= MAX_R:
+        target = im  # ya es válida
+    elif ratio < MIN_R:
+        # muy vertical -> recortar altura a 4:5, anclado arriba
+        new_h = int(w / MIN_R)
+        top = int((h - new_h) * 0.15)  # 15% desde arriba, corta pies
+        target = im.crop((0, top, w, top + new_h))
+    else:
+        # muy horizontal -> recortar ancho a 1.91:1, centrado
+        new_w = int(h * MAX_R)
+        left = (w - new_w) // 2
+        target = im.crop((left, 0, left + new_w, h))
+
+    out = io.BytesIO()
+    target.save(out, format="JPEG", quality=90)
+    out.seek(0)
+    return out.read()
+
+
 def create_media_container(image_url, caption):
     """Paso 1: crear el contenedor de medios."""
     endpoint = f"{GRAPH_BASE}/{IG_USER_ID}/media"
