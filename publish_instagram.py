@@ -64,8 +64,11 @@ def get_drive_service():
 
 def pick_image(service):
     """Selecciona una imagen de la carpeta de origen."""
+    # Reemplaza la cadena de abajo por el ID real de tu carpeta de Drive:
+    folder_id = "1cSK8eSFQ88nFdERpEDJ2gRa1asRv_Db5?dmr=1&ec=wgc-drive-%5Bmodule%5D-goto"
+
     query = (
-        f"'{DRIVE_FOLDER_ID}' in parents "
+        f"'{folder_id}' in parents "
         f"and trashed = false "
         f"and (mimeType = 'image/jpeg' or mimeType = 'image/png')"
     )
