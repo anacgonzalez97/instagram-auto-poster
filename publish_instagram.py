@@ -29,15 +29,13 @@ log = logging.getLogger("ig-publisher")
 
 # ==================================================================
 #  >>> AQUI NO SE PONE NADA. Todas las claves vienen de GitHub Secrets.
-#  El codigo las lee automaticamente de las variables de entorno.
 # ==================================================================
-# Carga las credenciales desde los Secrets de GitHub (si existen)
 GOOGLE_CREDS_JSON   = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 IG_USER_ID          = os.environ.get("IG_USER_ID", "")
 IG_ACCESS_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 
-# IDs fijas de Google Drive (Pega tus IDs reales entre las comillas)
+# IDs fijas de Google Drive
 DRIVE_FOLDER_ID     = "1cSK8eSFQ88nFdERpEDJ2gRa1asRv_Db5"
 PROCESSED_FOLDER_ID = "1c4QKFgRqWJKg4tv3AbCLwM6sif-A5iTo"
 
@@ -64,10 +62,8 @@ def get_drive_service():
 
 
 def pick_image(service):
-    """Selecciona una imagen de la carpeta de origen."""
-    # Reemplaza la cadena de abajo por el ID real de tu carpeta de Drive:
-    folder_id = "1cSK8eSFQ88nFdERpEDJ2gRa1asRv_Db5"
-
+    """Selecciona UNA imagen de la carpeta de origen (modo POST)."""
+    folder_id = DRIVE_FOLDER_ID
     query = (
         f"'{folder_id}' in parents "
         f"and trashed = false "
@@ -99,8 +95,26 @@ def pick_image(service):
     return chosen
 
 
+def pick_images(service, n=10):
+    """Coge hasta n imagenes (para carrusel). IG permite 2-10."""
+    folder_id = DRIVE_FOLDER_ID
+    query = (
+        f"'{folder_id}' in parents and trashed = false "
+        f"and (mimeType = 'image/jpeg' or mimeType = 'image/png')"
+    )
+    resp = service.files().list(
+        q=query, fields="files(id, name, mimeType)", pageSize=100,
+        supportsAllDrives=True, includeItemsFromAllDrives=True,
+    ).execute()
+    files = resp.get("files", [])
+    if not files:
+        return []
+    files = sorted(files, key=lambda f: f["name"])
+    return files[:n]
+
+
 def download_image_bytes(service, file_id):
-    """Descarga el binario de la imagen desde Drive (para pasarselo a Claude)."""
+    """Descarga el binario de la imagen desde Drive."""
     request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
     buffer = io.BytesIO()
     downloader = MediaIoBaseDownload(buffer, request)
@@ -109,37 +123,6 @@ def download_image_bytes(service, file_id):
         _, done = downloader.next_chunk()
     buffer.seek(0)
     return buffer.read()
-
-
-def make_public_temporarily(service, file_id):
-    """Crea un permiso publico de lectura y devuelve la URL de descarga directa."""
-    try:
-        permission = service.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"},
-            supportsAllDrives=True,
-            fields="id",
-        ).execute()
-        log.info("Permiso publico temporal creado: %s", permission["id"])
-    except HttpError as e:
-        log.error("No se pudo crear el permiso publico: %s", e)
-        raise
-
-    public_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-    return public_url, permission["id"]
-
-
-def revoke_public(service, file_id, permission_id):
-    """Elimina el permiso publico (limpieza de seguridad)."""
-    try:
-        service.permissions().delete(
-            fileId=file_id,
-            permissionId=permission_id,
-            supportsAllDrives=True,
-        ).execute()
-        log.info("Permiso publico revocado.")
-    except HttpError as e:
-        log.warning("No se pudo revocar el permiso publico (revisar manualmente): %s", e)
 
 
 def finalize_file(service, file_id):
@@ -171,6 +154,82 @@ def finalize_file(service, file_id):
 
 
 # ==================================================================
+# PROCESADO DE IMAGEN (recorte inteligente)
+# ==================================================================
+def smart_crop_bytes(img_bytes):
+    """Recorta a un ratio valido de IG (4:5 vertical, 1.91:1 horizontal).
+    En verticales corta por abajo (conserva cara, quita pies)."""
+    im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    w, h = im.size
+    ratio = w / h
+
+    MIN_R, MAX_R = 4 / 5, 1.91  # limites de IG
+
+    if MIN_R <= ratio <= MAX_R:
+        target = im  # ya es valida
+    elif ratio < MIN_R:
+        # muy vertical -> recortar altura a 4:5, anclado arriba
+        new_h = int(w / MIN_R)
+        top = int((h - new_h) * 0.15)  # 15% desde arriba, corta pies
+        target = im.crop((0, top, w, top + new_h))
+    else:
+        # muy horizontal -> recortar ancho a 1.91:1, centrado
+        new_w = int(h * MAX_R)
+        left = (w - new_w) // 2
+        target = im.crop((left, 0, left + new_w, h))
+
+    out = io.BytesIO()
+    target.save(out, format="JPEG", quality=90)
+    out.seek(0)
+    return out.read()
+
+
+# ==================================================================
+# HOST DE IMAGEN EN GITHUB (branch 'media')
+# ==================================================================
+def upload_to_github(img_bytes, filename):
+    """Sube la imagen procesada al repo (branch 'media') y devuelve URL raw publica."""
+    gh_token = os.environ["GH_PAT"]
+    gh_repo  = os.environ["GITHUB_REPOSITORY"]
+    branch   = "media"
+    path     = f"tmp/{int(time.time())}_{filename}.jpg"
+
+    headers = {
+        "Authorization": f"Bearer {gh_token}",
+        "Accept": "application/vnd.github+json",
+    }
+    content_b64 = base64.standard_b64encode(img_bytes).decode()
+    r = requests.put(
+        f"https://api.github.com/repos/{gh_repo}/contents/{path}",
+        headers=headers,
+        json={"message": f"media {path}", "content": content_b64, "branch": branch},
+        timeout=60,
+    )
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Error subiendo a GitHub: {r.text}")
+    return f"https://raw.githubusercontent.com/{gh_repo}/{branch}/{path}", path
+
+
+def cleanup_github(path):
+    """Borra el archivo temporal de la branch media tras publicar."""
+    try:
+        gh_token = os.environ["GH_PAT"]
+        gh_repo  = os.environ["GITHUB_REPOSITORY"]
+        headers = {"Authorization": f"Bearer {gh_token}",
+                   "Accept": "application/vnd.github+json"}
+        meta = requests.get(
+            f"https://api.github.com/repos/{gh_repo}/contents/{path}?ref=media",
+            headers=headers, timeout=30).json()
+        requests.delete(
+            f"https://api.github.com/repos/{gh_repo}/contents/{path}",
+            headers=headers,
+            json={"message": f"cleanup {path}", "sha": meta["sha"], "branch": "media"},
+            timeout=30)
+    except Exception as e:
+        log.warning("No se pudo limpiar %s: %s", path, e)
+
+
+# ==================================================================
 # CAPTION
 # ==================================================================
 def build_caption(filename):
@@ -193,7 +252,7 @@ def build_caption_ai(service, file_id, filename, mime_type):
 
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
-            model="cclaude-sonnet-4-5",
+            model="claude-sonnet-4-5",
             max_tokens=400,
             messages=[
                 {
@@ -227,60 +286,12 @@ def build_caption_ai(service, file_id, filename, mime_type):
         log.warning("Fallo la generacion con IA (%s). Uso plantilla simple.", e)
         return build_caption(filename)
 
-def upload_to_github(img_bytes, filename):
-    """Sube la imagen procesada al repo (branch 'media') y devuelve URL raw pública."""
-    gh_token = os.environ["GH_PAT"]
-    gh_repo  = os.environ["GITHUB_REPOSITORY"]
-    branch   = "media"
-    path     = f"tmp/{int(time.time())}_{filename}.jpg"
 
-    headers = {
-        "Authorization": f"Bearer {gh_token}",
-        "Accept": "application/vnd.github+json",
-    }
-    content_b64 = base64.standard_b64encode(img_bytes).decode()
-    r = requests.put(
-        f"https://api.github.com/repos/{gh_repo}/contents/{path}",
-        headers=headers,
-        json={"message": f"media {path}", "content": content_b64, "branch": branch},
-        timeout=60,
-    )
-    if r.status_code not in (200, 201):
-        raise RuntimeError(f"Error subiendo a GitHub: {r.text}")
-    return f"https://raw.githubusercontent.com/{gh_repo}/{branch}/{path}", path
 # ==================================================================
 # INSTAGRAM GRAPH API
 # ==================================================================
-def smart_crop_bytes(img_bytes):
-    """Recorta a un ratio válido de IG (4:5 vertical, 1.91:1 horizontal).
-    En verticales corta por abajo (conserva cara, quita pies)."""
-    im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    w, h = im.size
-    ratio = w / h
-
-    MIN_R, MAX_R = 4/5, 1.91  # límites de IG
-
-    if MIN_R <= ratio <= MAX_R:
-        target = im  # ya es válida
-    elif ratio < MIN_R:
-        # muy vertical -> recortar altura a 4:5, anclado arriba
-        new_h = int(w / MIN_R)
-        top = int((h - new_h) * 0.15)  # 15% desde arriba, corta pies
-        target = im.crop((0, top, w, top + new_h))
-    else:
-        # muy horizontal -> recortar ancho a 1.91:1, centrado
-        new_w = int(h * MAX_R)
-        left = (w - new_w) // 2
-        target = im.crop((left, 0, left + new_w, h))
-
-    out = io.BytesIO()
-    target.save(out, format="JPEG", quality=90)
-    out.seek(0)
-    return out.read()
-
-
 def create_media_container(image_url, caption):
-    """Paso 1: crear el contenedor de medios."""
+    """Paso 1 (POST/STORY): crear el contenedor de medios."""
     endpoint = f"{GRAPH_BASE}/{IG_USER_ID}/media"
     params = {"image_url": image_url, "access_token": IG_ACCESS_TOKEN}
 
@@ -294,6 +305,37 @@ def create_media_container(image_url, caption):
     if resp.status_code != 200 or "id" not in data:
         raise RuntimeError(f"Error creando el contenedor: {data}")
     log.info("Contenedor creado: %s", data["id"])
+    return data["id"]
+
+
+def create_carousel_item(image_url):
+    """Contenedor hijo de un carrusel (sin caption)."""
+    endpoint = f"{GRAPH_BASE}/{IG_USER_ID}/media"
+    params = {
+        "image_url": image_url,
+        "is_carousel_item": "true",
+        "access_token": IG_ACCESS_TOKEN,
+    }
+    resp = requests.post(endpoint, data=params, timeout=60)
+    data = resp.json()
+    if resp.status_code != 200 or "id" not in data:
+        raise RuntimeError(f"Error creando item de carrusel: {data}")
+    return data["id"]
+
+
+def create_carousel_container(children_ids, caption):
+    """Contenedor padre CAROUSEL que agrupa los hijos."""
+    endpoint = f"{GRAPH_BASE}/{IG_USER_ID}/media"
+    params = {
+        "media_type": "CAROUSEL",
+        "children": ",".join(children_ids),
+        "caption": caption,
+        "access_token": IG_ACCESS_TOKEN,
+    }
+    resp = requests.post(endpoint, data=params, timeout=60)
+    data = resp.json()
+    if resp.status_code != 200 or "id" not in data:
+        raise RuntimeError(f"Error creando carrusel: {data}")
     return data["id"]
 
 
@@ -401,35 +443,64 @@ def refresh_meta_token():
 # FLUJO PRINCIPAL
 # ==================================================================
 def main():
-    log.info("=== Inicio del proceso de publicacion (%s) ===", PUBLISH_TYPE)
+    mode = os.environ.get("PUBLISH_TYPE", "POST").upper()  # POST / STORY / CAROUSEL
+    log.info("=== Inicio (%s) ===", mode)
     service = get_drive_service()
 
-    chosen = pick_image(service)
-    if not chosen:
-        log.info("Sin imagenes. Fin sin error.")
-        return
+    if mode == "CAROUSEL":
+        count = int(os.environ.get("CAROUSEL_COUNT", "3"))
+        chosen = pick_images(service, count)
+        if len(chosen) < 2:
+            log.info("Menos de 2 imagenes, no hay carrusel. Fin.")
+            return
 
-    file_id = chosen["id"]
-    permission_id = None
-    published = False
+        gh_paths, child_ids = [], []
+        caption = None
+        try:
+            for f in chosen:
+                raw = download_image_bytes(service, f["id"])
+                cropped = smart_crop_bytes(raw)
+                url, gh_path = upload_to_github(cropped, f["id"])
+                gh_paths.append(gh_path)
+                if caption is None:  # caption basada en la 1a imagen
+                    caption = build_caption_ai(service, f["id"], f["name"], f["mimeType"])
+                child_ids.append(create_carousel_item(url))
 
-    try:
-        public_url, permission_id = make_public_temporarily(service, file_id)
-        caption = build_caption_ai(service, file_id, chosen["name"], chosen["mimeType"])
+            parent = create_carousel_container(child_ids, caption)
+            wait_until_ready(parent)
+            publish_container(parent)
+        finally:
+            for gh_path in gh_paths:
+                cleanup_github(gh_path)
 
-        container_id = create_media_container(public_url, caption)
-        wait_until_ready(container_id)
-        publish_container(container_id)
-        published = True
-    finally:
-        if permission_id:
-            revoke_public(service, file_id, permission_id)
+        for f in chosen:
+            finalize_file(service, f["id"])
 
-    if published:
-        finalize_file(service, file_id)
+    else:  # POST individual
+        chosen = pick_image(service)
+        if not chosen:
+            log.info("Sin imagenes. Fin.")
+            return
+        file_id = chosen["id"]
+        gh_path = None
+        published = False
+        try:
+            raw = download_image_bytes(service, file_id)
+            cropped = smart_crop_bytes(raw)
+            url, gh_path = upload_to_github(cropped, file_id)
+            caption = build_caption_ai(service, file_id, chosen["name"], chosen["mimeType"])
+            container_id = create_media_container(url, caption)
+            wait_until_ready(container_id)
+            publish_container(container_id)
+            published = True
+        finally:
+            if gh_path:
+                cleanup_github(gh_path)
+        if published:
+            finalize_file(service, file_id)
 
     refresh_meta_token()
-    log.info("=== Proceso finalizado ===")
+    log.info("=== Fin ===")
 
 
 if __name__ == "__main__":
