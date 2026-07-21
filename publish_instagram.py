@@ -31,8 +31,8 @@ log = logging.getLogger("ig-publisher")
 #  El codigo las lee automaticamente de las variables de entorno.
 # ==================================================================
 GOOGLE_CREDS_JSON   = os.environ["GOOGLE_CREDENTIALS_JSON"]
-DRIVE_FOLDER_ID     = os.environ["DRIVE_FOLDER_ID"]
-PROCESSED_FOLDER_ID = os.environ.get("PROCESSED_FOLDER_ID")
+DRIVE_FOLDER_ID     = os.environ["1cSK8eSFQ88nFdERpEDJ2gRa1asRv_Db5?dmr=1&ec=wgc-drive-%5Bmodule%5D-goto"]
+PROCESSED_FOLDER_ID = os.environ.get("1c4QKFgRqWJKg4tv3AbCLwM6sif-A5iTo?dmr=1&ec=wgc-drive-%5Bmodule%5D-goto")
 IG_USER_ID          = os.environ["IG_USER_ID"]
 IG_ACCESS_TOKEN     = os.environ["IG_ACCESS_TOKEN"]
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY")
