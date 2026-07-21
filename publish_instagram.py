@@ -227,7 +227,27 @@ def build_caption_ai(service, file_id, filename, mime_type):
         log.warning("Fallo la generacion con IA (%s). Uso plantilla simple.", e)
         return build_caption(filename)
 
+def upload_to_github(img_bytes, filename):
+    """Sube la imagen procesada al repo (branch 'media') y devuelve URL raw pública."""
+    gh_token = os.environ["GH_PAT"]
+    gh_repo  = os.environ["GITHUB_REPOSITORY"]
+    branch   = "media"
+    path     = f"tmp/{int(time.time())}_{filename}.jpg"
 
+    headers = {
+        "Authorization": f"Bearer {gh_token}",
+        "Accept": "application/vnd.github+json",
+    }
+    content_b64 = base64.standard_b64encode(img_bytes).decode()
+    r = requests.put(
+        f"https://api.github.com/repos/{gh_repo}/contents/{path}",
+        headers=headers,
+        json={"message": f"media {path}", "content": content_b64, "branch": branch},
+        timeout=60,
+    )
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Error subiendo a GitHub: {r.text}")
+    return f"https://raw.githubusercontent.com/{gh_repo}/{branch}/{path}", path
 # ==================================================================
 # INSTAGRAM GRAPH API
 # ==================================================================
