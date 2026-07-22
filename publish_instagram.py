@@ -2,6 +2,7 @@
 from PIL import Image
 import os
 import io
+import re
 import sys
 import json
 import time
@@ -40,12 +41,16 @@ DRIVE_FOLDER_ID     = "1cSK8eSFQ88nFdERpEDJ2gRa1asRv_Db5"
 PROCESSED_FOLDER_ID = "1c4QKFgRqWJKg4tv3AbCLwM6sif-A5iTo"
 
 # Opciones por defecto
-PUBLISH_TYPE        = os.environ.get("PUBLISH_TYPE", "POST").upper()
+PUBLISH_TYPE        = os.environ.get("PUBLISH_TYPE", "AUTO").upper()  # AUTO / STORY
 SELECT_MODE         = os.environ.get("SELECT_MODE", "FIRST").upper()
 
 GRAPH_API_VERSION   = "v21.0"
 GRAPH_BASE          = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 SCOPES              = ["https://www.googleapis.com/auth/drive"]
+
+# Formato de nombre para agrupar carruseles:  "01-1.jpg", "01-02.png", ...
+GROUP_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)")
+
 
 # ==================================================================
 # GOOGLE DRIVE
@@ -61,11 +66,10 @@ def get_drive_service():
         raise
 
 
-def pick_image(service):
-    """Selecciona UNA imagen de la carpeta de origen (modo POST)."""
-    folder_id = DRIVE_FOLDER_ID
+def list_images(service):
+    """Lista todas las imagenes de la carpeta de origen."""
     query = (
-        f"'{folder_id}' in parents "
+        f"'{DRIVE_FOLDER_ID}' in parents "
         f"and trashed = false "
         f"and (mimeType = 'image/jpeg' or mimeType = 'image/png')"
     )
@@ -73,44 +77,59 @@ def pick_image(service):
         resp = service.files().list(
             q=query,
             fields="files(id, name, mimeType)",
-            pageSize=100,
+            pageSize=200,
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
         ).execute()
     except HttpError as e:
         log.error("Error consultando la carpeta de Drive: %s", e)
         raise
+    return resp.get("files", [])
 
-    files = resp.get("files", [])
+
+def pick_group(service):
+    """Devuelve la lista de archivos del siguiente grupo a publicar.
+
+    Convencion de nombres:
+        01-1.jpg, 01-2.jpg, 01-3.jpg  -> carrusel del grupo 01 (3 imagenes)
+        02-1.jpg, 02-2.jpg            -> carrusel del grupo 02 (2 imagenes)
+        03-1.jpg                      -> post individual
+        playa.jpg                     -> sin numerar, post individual
+
+    Se publica siempre el grupo con el prefijo mas bajo.
+    Devuelve 1 archivo -> POST individual. 2-10 -> CAROUSEL.
+    """
+    files = list_images(service)
     if not files:
         log.warning("No hay imagenes disponibles en la carpeta. Nada que publicar.")
-        return None
-
-    if SELECT_MODE == "RANDOM":
-        chosen = random.choice(files)
-    else:
-        chosen = sorted(files, key=lambda f: f["name"])[0]
-
-    log.info("Imagen seleccionada: %s (%s)", chosen["name"], chosen["id"])
-    return chosen
-
-
-def pick_images(service, n=10):
-    """Coge hasta n imagenes (para carrusel). IG permite 2-10."""
-    folder_id = DRIVE_FOLDER_ID
-    query = (
-        f"'{folder_id}' in parents and trashed = false "
-        f"and (mimeType = 'image/jpeg' or mimeType = 'image/png')"
-    )
-    resp = service.files().list(
-        q=query, fields="files(id, name, mimeType)", pageSize=100,
-        supportsAllDrives=True, includeItemsFromAllDrives=True,
-    ).execute()
-    files = resp.get("files", [])
-    if not files:
         return []
-    files = sorted(files, key=lambda f: f["name"])
-    return files[:n]
+
+    grupos = {}      # prefijo -> [(orden, file)]
+    sueltas = []
+    for f in files:
+        m = GROUP_RE.match(f["name"])
+        if m:
+            grupos.setdefault(int(m.group(1)), []).append((int(m.group(2)), f))
+        else:
+            sueltas.append(f)
+
+    if grupos:
+        prefijo = min(grupos)
+        items = sorted(grupos[prefijo], key=lambda t: t[0])
+        chosen = [f for _, f in items][:10]   # IG permite maximo 10
+        log.info(
+            "Grupo %s -> %d imagen(es): %s",
+            prefijo, len(chosen), [f["name"] for f in chosen],
+        )
+        return chosen
+
+    # No hay nada numerado: publicamos una imagen suelta
+    if SELECT_MODE == "RANDOM":
+        chosen = random.choice(sueltas)
+    else:
+        chosen = sorted(sueltas, key=lambda f: f["name"])[0]
+    log.info("Sin grupos numerados. Imagen suelta: %s", chosen["name"])
+    return [chosen]
 
 
 def download_image_bytes(service, file_id):
@@ -156,21 +175,39 @@ def finalize_file(service, file_id):
 # ==================================================================
 # PROCESADO DE IMAGEN (recorte inteligente)
 # ==================================================================
-def smart_crop_bytes(img_bytes):
+def smart_crop_bytes(img_bytes, force_ratio=None):
     """Recorta a un ratio valido de IG (4:5 vertical, 1.91:1 horizontal).
-    En verticales corta por abajo (conserva cara, quita pies)."""
+
+    Si se pasa force_ratio (ancho/alto), recorta exactamente a ese ratio.
+    Se usa en carruseles para que todas las imagenes compartan proporcion,
+    porque IG aplica el ratio de la primera a todas las demas.
+    """
     im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     w, h = im.size
     ratio = w / h
 
     MIN_R, MAX_R = 4 / 5, 1.91  # limites de IG
 
-    if MIN_R <= ratio <= MAX_R:
+    if force_ratio:
+        target_r = force_ratio
+        if ratio > target_r:
+            # sobra ancho -> recortar lados, centrado
+            new_w = int(h * target_r)
+            left = (w - new_w) // 2
+            target = im.crop((left, 0, left + new_w, h))
+        elif ratio < target_r:
+            # sobra alto -> recortar altura, anclado arriba (conserva cara)
+            new_h = int(w / target_r)
+            top = int((h - new_h) * 0.15)
+            target = im.crop((0, top, w, top + new_h))
+        else:
+            target = im
+    elif MIN_R <= ratio <= MAX_R:
         target = im  # ya es valida
     elif ratio < MIN_R:
-        # muy vertical -> recortar altura a 4:5, anclado arriba
+        # muy vertical -> recortar altura a 4:5, anclado arriba, corta pies
         new_h = int(w / MIN_R)
-        top = int((h - new_h) * 0.15)  # 15% desde arriba, corta pies
+        top = int((h - new_h) * 0.15)
         target = im.crop((0, top, w, top + new_h))
     else:
         # muy horizontal -> recortar ancho a 1.91:1, centrado
@@ -182,6 +219,18 @@ def smart_crop_bytes(img_bytes):
     target.save(out, format="JPEG", quality=90)
     out.seek(0)
     return out.read()
+
+
+def decide_carousel_ratio(img_bytes):
+    """Elige el ratio comun del carrusel a partir de la PRIMERA imagen."""
+    im = Image.open(io.BytesIO(img_bytes))
+    w, h = im.size
+    r = w / h
+    if r < 0.95:
+        return 4 / 5      # vertical
+    if r > 1.2:
+        return 1.91       # horizontal
+    return 1.0            # cuadrado
 
 
 # ==================================================================
@@ -232,21 +281,31 @@ def cleanup_github(path):
 # ==================================================================
 # CAPTION
 # ==================================================================
+def clean_name_for_caption(filename):
+    """Quita el prefijo de grupo (01-2) y la extension del nombre."""
+    base = os.path.splitext(filename)[0]
+    base = GROUP_RE.sub("", base)
+    return base.replace("_", " ").replace("-", " ").strip()
+
+
 def build_caption(filename):
     """Plantilla simple de respaldo basada en el nombre del archivo."""
-    base = os.path.splitext(filename)[0].replace("_", " ").replace("-", " ").strip()
+    base = clean_name_for_caption(filename)
     hashtags = "#foto #instadaily #photography #dailypost"
+    if not base:
+        return hashtags
     return f"{base.capitalize()}\n\n{hashtags}"
 
 
-def build_caption_ai(service, file_id, filename, mime_type):
+def build_caption_ai(service, file_id, filename, mime_type, img_bytes=None, extra=""):
     """Genera un caption con Claude analizando la imagen. Cae a plantilla si falla."""
     if not ANTHROPIC_API_KEY:
         log.warning("Sin ANTHROPIC_API_KEY, uso plantilla simple.")
         return build_caption(filename)
 
     try:
-        img_bytes = download_image_bytes(service, file_id)
+        if img_bytes is None:
+            img_bytes = download_image_bytes(service, file_id)
         img_b64 = base64.standard_b64encode(img_bytes).decode("utf-8")
         media_type = "image/png" if mime_type == "image/png" else "image/jpeg"
 
@@ -271,6 +330,7 @@ def build_caption_ai(service, file_id, filename, mime_type):
                             "text": (
                                 "Escribe un caption atractivo para Instagram en espanol "
                                 "sobre esta imagen. Maximo 2 frases, tono cercano. "
+                                + extra +
                                 "Anade una linea en blanco y luego 5-8 hashtags relevantes. "
                                 "Devuelve SOLO el caption, sin comillas ni explicaciones."
                             ),
@@ -290,12 +350,12 @@ def build_caption_ai(service, file_id, filename, mime_type):
 # ==================================================================
 # INSTAGRAM GRAPH API
 # ==================================================================
-def create_media_container(image_url, caption):
+def create_media_container(image_url, caption, as_story=False):
     """Paso 1 (POST/STORY): crear el contenedor de medios."""
     endpoint = f"{GRAPH_BASE}/{IG_USER_ID}/media"
     params = {"image_url": image_url, "access_token": IG_ACCESS_TOKEN}
 
-    if PUBLISH_TYPE == "STORY":
+    if as_story:
         params["media_type"] = "STORIES"
     else:
         params["caption"] = caption
@@ -320,6 +380,7 @@ def create_carousel_item(image_url):
     data = resp.json()
     if resp.status_code != 200 or "id" not in data:
         raise RuntimeError(f"Error creando item de carrusel: {data}")
+    log.info("Item de carrusel creado: %s", data["id"])
     return data["id"]
 
 
@@ -336,6 +397,7 @@ def create_carousel_container(children_ids, caption):
     data = resp.json()
     if resp.status_code != 200 or "id" not in data:
         raise RuntimeError(f"Error creando carrusel: {data}")
+    log.info("Carrusel creado: %s", data["id"])
     return data["id"]
 
 
@@ -443,61 +505,73 @@ def refresh_meta_token():
 # FLUJO PRINCIPAL
 # ==================================================================
 def main():
-    mode = os.environ.get("PUBLISH_TYPE", "POST").upper()  # POST / STORY / CAROUSEL
-    log.info("=== Inicio (%s) ===", mode)
+    log.info("=== Inicio (%s) ===", PUBLISH_TYPE)
     service = get_drive_service()
 
-    if mode == "CAROUSEL":
-        count = int(os.environ.get("CAROUSEL_COUNT", "3"))
-        chosen = pick_images(service, count)
-        if len(chosen) < 2:
-            log.info("Menos de 2 imagenes, no hay carrusel. Fin.")
-            return
+    chosen = pick_group(service)
+    if not chosen:
+        log.info("Sin imagenes. Fin.")
+        return
 
-        gh_paths, child_ids = [], []
-        caption = None
-        try:
-            for f in chosen:
-                raw = download_image_bytes(service, f["id"])
-                cropped = smart_crop_bytes(raw)
-                url, gh_path = upload_to_github(cropped, f["id"])
-                gh_paths.append(gh_path)
-                if caption is None:  # caption basada en la 1a imagen
-                    caption = build_caption_ai(service, f["id"], f["name"], f["mimeType"])
+    as_story = (PUBLISH_TYPE == "STORY")
+    if as_story:
+        chosen = chosen[:1]   # una story = una imagen
+        log.info("Modo STORY forzado, solo se usa: %s", chosen[0]["name"])
+
+    es_carrusel = (not as_story) and len(chosen) >= 2
+    log.info("Modo: %s (%d imagen/es)",
+             "CAROUSEL" if es_carrusel else ("STORY" if as_story else "POST"),
+             len(chosen))
+
+    gh_paths, child_ids = [], []
+    container_id = None
+    published = False
+
+    try:
+        # Descargamos la primera para decidir el ratio comun y generar el caption
+        first_raw = download_image_bytes(service, chosen[0]["id"])
+        force_ratio = decide_carousel_ratio(first_raw) if es_carrusel else None
+        if force_ratio:
+            log.info("Ratio comun del carrusel: %.3f", force_ratio)
+
+        caption = ""
+        if not as_story:
+            extra = ("Es la primera imagen de un carrusel de "
+                     f"{len(chosen)} fotos. " if es_carrusel else "")
+            caption = build_caption_ai(
+                service,
+                chosen[0]["id"],
+                chosen[0]["name"],
+                chosen[0]["mimeType"],
+                img_bytes=first_raw,
+                extra=extra,
+            )
+
+        for i, f in enumerate(chosen):
+            raw = first_raw if i == 0 else download_image_bytes(service, f["id"])
+            cropped = smart_crop_bytes(raw, force_ratio=force_ratio)
+            url, gh_path = upload_to_github(cropped, f["id"])
+            gh_paths.append(gh_path)
+            log.info("Subida %d/%d: %s", i + 1, len(chosen), f["name"])
+
+            if es_carrusel:
                 child_ids.append(create_carousel_item(url))
+            else:
+                container_id = create_media_container(url, caption, as_story=as_story)
 
-            parent = create_carousel_container(child_ids, caption)
-            wait_until_ready(parent)
-            publish_container(parent)
-        finally:
-            for gh_path in gh_paths:
-                cleanup_github(gh_path)
+        if es_carrusel:
+            container_id = create_carousel_container(child_ids, caption)
 
+        wait_until_ready(container_id)
+        publish_container(container_id)
+        published = True
+    finally:
+        for p in gh_paths:
+            cleanup_github(p)
+
+    if published:
         for f in chosen:
             finalize_file(service, f["id"])
-
-    else:  # POST individual
-        chosen = pick_image(service)
-        if not chosen:
-            log.info("Sin imagenes. Fin.")
-            return
-        file_id = chosen["id"]
-        gh_path = None
-        published = False
-        try:
-            raw = download_image_bytes(service, file_id)
-            cropped = smart_crop_bytes(raw)
-            url, gh_path = upload_to_github(cropped, file_id)
-            caption = build_caption_ai(service, file_id, chosen["name"], chosen["mimeType"])
-            container_id = create_media_container(url, caption)
-            wait_until_ready(container_id)
-            publish_container(container_id)
-            published = True
-        finally:
-            if gh_path:
-                cleanup_github(gh_path)
-        if published:
-            finalize_file(service, file_id)
 
     refresh_meta_token()
     log.info("=== Fin ===")
