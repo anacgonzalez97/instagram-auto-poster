@@ -2,7 +2,7 @@ name: Publicar en Instagram
 on:
   schedule:
     # 08:00 UTC cada dia. Barcelona = UTC+1 (invierno) / UTC+2 (verano).
-    - cron: "0 8 * * *"
+    - cron: "0 20 * * *"
   workflow_dispatch:  # permite lanzarlo manualmente desde la pestana Actions
 permissions:
   contents: write
