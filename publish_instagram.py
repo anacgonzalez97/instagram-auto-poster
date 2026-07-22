@@ -37,8 +37,8 @@ IG_ACCESS_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 
 # IDs fijas de Google Drive
-DRIVE_FOLDER_ID     = "1cSK8eSFQ88nFdERpEDJ2gRa1asRv_Db5"
-PROCESSED_FOLDER_ID = "1c4QKFgRqWJKg4tv3AbCLwM6sif-A5iTo"
+DRIVE_FOLDER_ID     = os.environ.get("DRIVE_FOLDER_ID", "1cSK8eSFQ88nFdERpEDJ2gRa1asRv_Db5")
+PROCESSED_FOLDER_ID = os.environ.get("PROCESSED_FOLDER_ID", "1c4QKFgRqWJKg4tv3AbCLwM6sif-A5iTo")
 
 # Opciones por defecto
 PUBLISH_TYPE        = os.environ.get("PUBLISH_TYPE", "AUTO").upper()  # AUTO / STORY
